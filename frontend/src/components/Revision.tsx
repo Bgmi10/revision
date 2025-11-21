@@ -1,9 +1,20 @@
-import React, { useState, useEffect } from 'react';
+import  { useState, useEffect } from 'react';
 import { ChevronDown, ChevronUp, Plus, X } from 'lucide-react';
 
+interface Question {
+  id: number;
+  question: string;
+  answer: string;
+}
+
+interface Topic {
+  id: number;
+  name: string;
+  questions: Question[];
+}
+
 export default function Revision() {
-  // Load initial data from localStorage or use default
-  const loadInitialData = () => {
+  const loadInitialData = (): Topic[] => {
     const savedData = localStorage.getItem('faqTopics');
     if (savedData) {
       return JSON.parse(savedData);
@@ -20,20 +31,19 @@ export default function Revision() {
     ];
   };
 
-  const [topics, setTopics] = useState(loadInitialData);
+  const [topics, setTopics] = useState<Topic[]>(loadInitialData);
   
-  // Save to localStorage whenever topics change
   useEffect(() => {
     localStorage.setItem('faqTopics', JSON.stringify(topics));
   }, [topics]);
   
-  const [expandedQuestions, setExpandedQuestions] = useState({});
+  const [expandedQuestions, setExpandedQuestions] = useState<Record<string, boolean>>({});
   const [newTopicName, setNewTopicName] = useState('');
   const [showTopicForm, setShowTopicForm] = useState(false);
-  const [newQuestion, setNewQuestion] = useState({});
-  const [showQuestionForm, setShowQuestionForm] = useState({});
+  const [newQuestion, setNewQuestion] = useState<Record<number, { question: string; answer: string }>>({});
+  const [showQuestionForm, setShowQuestionForm] = useState<Record<number, boolean>>({});
 
-  const toggleQuestion = (topicId, questionId) => {
+  const toggleQuestion = (topicId: number, questionId: number) => {
     const key = `${topicId}-${questionId}`;
     setExpandedQuestions(prev => ({
       ...prev,
@@ -43,7 +53,7 @@ export default function Revision() {
 
   const addTopic = () => {
     if (newTopicName.trim()) {
-      const newTopic = {
+      const newTopic: Topic = {
         id: Date.now(),
         name: newTopicName,
         questions: []
@@ -54,7 +64,7 @@ export default function Revision() {
     }
   };
 
-  const addQuestion = (topicId) => {
+  const addQuestion = (topicId: number) => {
     const question = newQuestion[topicId]?.question;
     const answer = newQuestion[topicId]?.answer;
     
@@ -83,11 +93,11 @@ export default function Revision() {
     }
   };
 
-  const deleteTopic = (topicId) => {
+  const deleteTopic = (topicId: number) => {
     setTopics(topics.filter(topic => topic.id !== topicId));
   };
 
-  const deleteQuestion = (topicId, questionId) => {
+  const deleteQuestion = (topicId: number, questionId: number) => {
     setTopics(topics.map(topic => {
       if (topic.id === topicId) {
         return {
@@ -230,6 +240,7 @@ export default function Revision() {
                       [topic.id]: { ...prev[topic.id], answer: e.target.value }
                     }))}
                     placeholder="Enter answer"
+                    //@ts-ignore
                     rows="3"
                     className="w-full px-3 py-2 border border-gray-300 rounded-lg mb-3 focus:outline-none focus:ring-2 focus:ring-indigo-500"
                   />

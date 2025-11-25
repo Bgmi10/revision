@@ -144,6 +144,19 @@ export default function Revision() {
     }
   };
 
+  const deleteDate = (dateId: string) => {
+    setDateGroups(prev => prev.filter(dg => dg.id !== dateId));
+    // If the deleted date was selected, select the first available date
+    if (selectedDate === dateId) {
+      const remaining = dateGroups.filter(dg => dg.id !== dateId);
+      if (remaining.length > 0) {
+        setSelectedDate(remaining[0].id);
+      } else {
+        setSelectedDate(new Date().toISOString().split('T')[0]);
+      }
+    }
+  };
+
   const deleteTopic = (dateId: string, topicId: number) => {
     setDateGroups(prev => prev.map(dg => 
       dg.id === dateId
@@ -241,20 +254,35 @@ export default function Revision() {
           
           <div className="flex flex-wrap gap-2 mb-4">
             {dateGroups.map(dateGroup => (
-              <button
+              <div
                 key={dateGroup.id}
-                onClick={() => setSelectedDate(dateGroup.id)}
-                className={`px-4 py-2 rounded-lg transition flex items-center gap-2 ${
+                className={`relative group rounded-lg transition flex items-center gap-2 ${
                   selectedDate === dateGroup.id
                     ? 'bg-indigo-600 text-white'
                     : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
                 }`}
               >
-                {new Date(dateGroup.date).toLocaleDateString()}
-                <span className="bg-white text-black bg-opacity-20 px-2 py-1 rounded text-sm">
-                  {getTotalQuestions(dateGroup.topics)}
-                </span>
-              </button>
+                <button
+                  onClick={() => setSelectedDate(dateGroup.id)}
+                  className="px-4 py-2 flex items-center gap-2 flex-1"
+                >
+                  {new Date(dateGroup.date).toLocaleDateString()}
+                  <span className="bg-white text-black bg-opacity-20 px-2 py-1 rounded text-sm">
+                    {getTotalQuestions(dateGroup.topics)}
+                  </span>
+                </button>
+                {dateGroups.length > 1 && (
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      deleteDate(dateGroup.id);
+                    }}
+                    className="opacity-0 group-hover:opacity-100 text-red-500 hover:text-red-700 transition-opacity p-2"
+                  >
+                    <X size={16} />
+                  </button>
+                )}
+              </div>
             ))}
           </div>
           

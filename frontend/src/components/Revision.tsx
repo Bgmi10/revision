@@ -1,11 +1,13 @@
-import React, { useState, useEffect } from 'react';
-import { ChevronDown, ChevronUp, Plus, X, Calendar, GripVertical } from 'lucide-react';
+import React, { useState, useEffect, useRef } from 'react';
+import { ChevronDown, ChevronUp, Plus, X, Calendar, GripVertical, Edit2, Link, Copy } from 'lucide-react';
 
 interface Question {
   id: number;
   number: number;
   question: string;
   answer: string;
+  duplicateOf?: number[];
+  isDuplicate?: boolean;
 }
 
 interface Topic {
@@ -50,6 +52,10 @@ export default function Revision() {
   const [newDateInput, setNewDateInput] = useState('');
   const [showDateForm, setShowDateForm] = useState(false);
   const [draggedQuestion, setDraggedQuestion] = useState<{ dateId: string; topicId: number; questionId: number } | null>(null);
+  const [editingQuestion, setEditingQuestion] = useState<{ dateId: string; topicId: number; questionId: number; field: 'question' | 'answer' } | null>(null);
+  const [editValue, setEditValue] = useState('');
+  const [duplicateInput, setDuplicateInput] = useState<Record<string, string>>({});
+  const questionRefs = useRef<Record<string, HTMLDivElement | null>>({});
   
   useEffect(() => {
     localStorage.setItem('revisionData', JSON.stringify(dateGroups));
@@ -233,6 +239,227 @@ export default function Revision() {
     return topics.reduce((sum, topic) => sum + topic.questions.length, 0);
   };
 
+  const startEditing = (dateId: string, topicId: number, questionId: number, field: 'question' | 'answer') => {
+    const question = dateGroups
+      .find(dg => dg.id === dateId)?.topics
+      .find(t => t.id === topicId)?.questions
+      .find(q => q.id === questionId);
+    
+    if (question) {
+      setEditingQuestion({ dateId, topicId, questionId, field });
+      setEditValue(field === 'question' ? question.question : question.answer);
+    }
+  };
+
+  const saveEdit = () => {
+    if (!editingQuestion) return;
+
+    const { dateId, topicId, questionId, field } = editingQuestion;
+    
+    setDateGroups(prev => prev.map(dg => 
+      dg.id === dateId
+        ? {
+            ...dg,
+            topics: dg.topics.map(topic => 
+              topic.id === topicId
+                ? {
+                    ...topic,
+                    questions: topic.questions.map(q => 
+                      q.id === questionId
+                        ? { ...q, [field]: editValue }
+                        : q
+                    )
+                  }
+                : topic
+            )
+          }
+        : dg
+    ));
+    
+    setEditingQuestion(null);
+    setEditValue('');
+  };
+
+  const cancelEdit = () => {
+    setEditingQuestion(null);
+    setEditValue('');
+  };
+
+  const detectDuplicates = (questions: Question[]): Question[] => {
+    const duplicateMap = new Map<number, number[]>();
+    
+    // First, preserve any manually added duplicates
+    questions.forEach(q => {
+      if (q.duplicateOf && q.duplicateOf.length > 0) {
+        duplicateMap.set(q.number, [...q.duplicateOf]);
+      }
+    });
+    
+    // Then detect automatic duplicates
+    for (let i = 0; i < questions.length; i++) {
+      const current = questions[i];
+      const currentWords = current.question.toLowerCase()
+        .split(/\s+/)
+        .filter(word => word.length > 2)
+        .filter(word => !/^\d+$/.test(word)); // Exclude pure numbers
+      
+      for (let j = i + 1; j < questions.length; j++) {
+        const compare = questions[j];
+        const compareWords = compare.question.toLowerCase()
+          .split(/\s+/)
+          .filter(word => word.length > 2)
+          .filter(word => !/^\d+$/.test(word)); // Exclude pure numbers
+        
+        const commonWords = currentWords.filter(word => compareWords.includes(word));
+        
+        if (commonWords.length >= 5) {
+          // Add to current question's duplicates
+          const currentDuplicates = duplicateMap.get(current.number) || [];
+          if (!currentDuplicates.includes(compare.number)) {
+            duplicateMap.set(current.number, [...currentDuplicates, compare.number]);
+          }
+          
+          // Add to compare question's duplicates
+          const compareDuplicates = duplicateMap.get(compare.number) || [];
+          if (!compareDuplicates.includes(current.number)) {
+            duplicateMap.set(compare.number, [...compareDuplicates, current.number]);
+          }
+        }
+      }
+    }
+    
+    return questions.map(q => ({
+      ...q,
+      duplicateOf: duplicateMap.get(q.number) || [],
+      isDuplicate: duplicateMap.has(q.number) && duplicateMap.get(q.number)!.length > 0
+    }));
+  };
+
+  const addManualDuplicate = (dateId: string, topicId: number, questionNumber: number) => {
+    const key = `${dateId}-${topicId}-${questionNumber}`;
+    const duplicateNumbers = duplicateInput[key]?.split(',').map(n => parseInt(n.trim())).filter(n => !isNaN(n)) || [];
+    
+    if (duplicateNumbers.length === 0) return;
+    
+    setDateGroups(prev => prev.map(dg => 
+      dg.id === dateId
+        ? {
+            ...dg,
+            topics: dg.topics.map(topic => 
+              topic.id === topicId
+                ? {
+                    ...topic,
+                    questions: topic.questions.map(q => {
+                      if (q.number === questionNumber) {
+                        const existingDuplicates = q.duplicateOf || [];
+                        const newDuplicates = [...new Set([...existingDuplicates, ...duplicateNumbers])];
+                        return { ...q, duplicateOf: newDuplicates, isDuplicate: newDuplicates.length > 0 };
+                      }
+                      if (duplicateNumbers.includes(q.number)) {
+                        const existingDuplicates = q.duplicateOf || [];
+                        const newDuplicates = [...new Set([...existingDuplicates, questionNumber])];
+                        return { ...q, duplicateOf: newDuplicates, isDuplicate: newDuplicates.length > 0 };
+                      }
+                      return q;
+                    })
+                  }
+                : topic
+            )
+          }
+        : dg
+    ));
+    
+    setDuplicateInput(prev => ({ ...prev, [key]: '' }));
+  };
+
+  const scrollToQuestion = (questionNumber: number) => {
+    // First, find the question across all date groups and topics
+    let targetQuestion = null;
+    let targetDateId = null;
+    let targetTopicId = null;
+    
+    for (const dateGroup of dateGroups) {
+      for (const topic of dateGroup.topics) {
+        const foundQuestion = topic.questions.find(q => q.number === questionNumber);
+        if (foundQuestion) {
+          targetQuestion = foundQuestion;
+          targetDateId = dateGroup.id;
+          targetTopicId = topic.id;
+          break;
+        }
+      }
+      if (targetQuestion) break;
+    }
+    
+    if (!targetQuestion || !targetDateId || !targetTopicId) {
+      alert(`Question ${questionNumber} not found!`);
+      return;
+    }
+    
+    // Switch to the correct date if needed
+    if (targetDateId !== selectedDate) {
+      setSelectedDate(targetDateId);
+      // Wait for the date switch to complete
+      setTimeout(() => {
+        scrollToQuestionElement(targetDateId, targetTopicId, targetQuestion.id);
+      }, 100);
+    } else {
+      scrollToQuestionElement(targetDateId, targetTopicId, targetQuestion.id);
+    }
+  };
+  
+  const scrollToQuestionElement = (dateId: string, topicId: number, questionId: number) => {
+    const questionKey = `${dateId}-${topicId}-${questionId}`;
+    
+    // Expand the question first
+    setExpandedQuestions(prev => ({
+      ...prev,
+      [questionKey]: true
+    }));
+    
+    // Wait a bit for expansion, then scroll
+    setTimeout(() => {
+      const element = questionRefs.current[questionKey];
+      if (element) {
+        element.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        // Highlight the question briefly
+        element.style.backgroundColor = '#fef3c7';
+        element.style.transform = 'scale(1.02)';
+        element.style.transition = 'all 0.3s ease';
+        
+        setTimeout(() => {
+          element.style.backgroundColor = '';
+          element.style.transform = '';
+        }, 2000);
+      }
+    }, 200);
+  };
+
+
+  const copyToClipboard = async (text: string, type: 'question' | 'answer') => {
+    try {
+      await navigator.clipboard.writeText(text);
+      // Show temporary feedback
+      const event = new CustomEvent('showToast', { 
+        detail: { message: `${type.charAt(0).toUpperCase() + type.slice(1)} copied to clipboard!`, type: 'success' }
+      });
+      window.dispatchEvent(event);
+    } catch (err) {
+      // Fallback for older browsers
+      const textArea = document.createElement('textarea');
+      textArea.value = text;
+      document.body.appendChild(textArea);
+      textArea.select();
+      document.execCommand('copy');
+      document.body.removeChild(textArea);
+      
+      const event = new CustomEvent('showToast', { 
+        detail: { message: `${type.charAt(0).toUpperCase() + type.slice(1)} copied to clipboard!`, type: 'success' }
+      });
+      window.dispatchEvent(event);
+    }
+  };
+
   const currentDateGroup = getCurrentDateGroup();
 
   return (
@@ -384,31 +611,114 @@ export default function Revision() {
 
               {/* Questions */}
               <div className="space-y-3 mb-4">
-                {topic.questions.map((q, index) => {
+                {detectDuplicates(topic.questions).map((q, index) => {
                   const key = `${selectedDate}-${topic.id}-${q.id}`;
                   const isExpanded = expandedQuestions[key];
+                  const isEditing = editingQuestion?.dateId === selectedDate && editingQuestion?.topicId === topic.id && editingQuestion?.questionId === q.id;
+                  const duplicateKey = `${selectedDate}-${topic.id}-${q.number}`;
                   
                   return (
                     <div 
                       key={q.id} 
-                      className="border border-gray-200 rounded-lg overflow-hidden"
-                      draggable
-                      onDragStart={(e) => handleDragStart(e, selectedDate, topic.id, q.id)}
+                      //@ts-ignore
+                      ref={(el) => questionRefs.current[key] = el}
+                      className={`border rounded-lg overflow-hidden ${
+                        q.isDuplicate ? 'border-yellow-400 bg-yellow-50' : 'border-gray-200'
+                      }`}
+                      draggable={!isEditing}
+                      onDragStart={(e) => !isEditing && handleDragStart(e, selectedDate, topic.id, q.id)}
                       onDragOver={handleDragOver}
                       onDrop={(e) => handleDrop(e, selectedDate, topic.id, index)}
                     >
                       <div
-                        onClick={() => toggleQuestion(selectedDate, topic.id, q.id)}
-                        className="flex justify-between items-center p-4 bg-gray-50 hover:bg-gray-100 cursor-pointer transition"
+                        onClick={() => !isEditing && toggleQuestion(selectedDate, topic.id, q.id)}
+                        className={`flex justify-between items-center p-4 hover:bg-gray-100 cursor-pointer transition ${
+                          q.isDuplicate ? 'bg-yellow-100' : 'bg-gray-50'
+                        }`}
                       >
                         <div className="flex items-center gap-3 flex-1">
                           <GripVertical className="text-gray-400 cursor-grab" size={16} />
-                          <span className="bg-indigo-600 text-white px-2 py-1 rounded-full text-sm font-bold min-w-[24px] text-center">
+                          <span className={`px-2 py-1 rounded-full text-sm font-bold min-w-[24px] text-center ${
+                            q.isDuplicate ? 'bg-yellow-600 text-white' : 'bg-indigo-600 text-white'
+                          }`}>
                             {q.number}
                           </span>
-                          <h3 className="font-semibold text-gray-800 flex-1">{q.question}</h3>
+                          {isEditing && editingQuestion?.field === 'question' ? (
+                            <div className="flex-1 flex gap-2">
+                              <input
+                                type="text"
+                                value={editValue}
+                                onChange={(e) => setEditValue(e.target.value)}
+                                className="flex-1 px-2 py-1 border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                                onClick={(e) => e.stopPropagation()}
+                              />
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  saveEdit();
+                                }}
+                                className="px-3 py-1 bg-green-600 text-white rounded hover:bg-green-700"
+                              >
+                                Save
+                              </button>
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  cancelEdit();
+                                }}
+                                className="px-3 py-1 bg-gray-300 text-gray-700 rounded hover:bg-gray-400"
+                              >
+                                Cancel
+                              </button>
+                            </div>
+                          ) : (
+                            <div className="flex-1 flex items-center gap-2">
+                              <h3 className="font-semibold text-gray-800 flex-1">
+                                {q.question}
+                              </h3>
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  copyToClipboard(q.question, 'question');
+                                }}
+                                className="text-green-500 hover:text-green-700 transition p-1"
+                                title="Copy question"
+                              >
+                                <Copy size={14} />
+                              </button>
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  startEditing(selectedDate, topic.id, q.id, 'question');
+                                }}
+                                className="text-blue-500 hover:text-blue-700 transition p-1"
+                                title="Edit question"
+                              >
+                                <Edit2 size={14} />
+                              </button>
+                            </div>
+                          )}
                         </div>
                         <div className="flex items-center gap-2">
+                          {q.isDuplicate && (
+                            <div className="flex items-center gap-1">
+                              <Link size={14} className="text-yellow-600" />
+                              <div className="flex gap-1">
+                                {q.duplicateOf?.map(dupNum => (
+                                  <button
+                                    key={dupNum}
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      scrollToQuestion(dupNum);
+                                    }}
+                                    className="bg-yellow-600 text-white px-1 py-0.5 rounded text-xs hover:bg-yellow-700"
+                                  >
+                                    {dupNum}
+                                  </button>
+                                ))}
+                              </div>
+                            </div>
+                          )}
                           <button
                             onClick={(e) => {
                               e.stopPropagation();
@@ -427,8 +737,79 @@ export default function Revision() {
                       </div>
                       
                       {isExpanded && (
-                        <div className="p-4 bg-white border-t border-gray-200">
-                          <p className="text-gray-700">{q.answer}</p>
+                        <div className="p-4 bg-white border-t border-gray-200 space-y-4">
+                          {isEditing && editingQuestion?.field === 'answer' ? (
+                            <div className="flex flex-col gap-2">
+                              <textarea
+                                value={editValue}
+                                onChange={(e) => setEditValue(e.target.value)}
+                                className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                                rows={4}
+                                style={{ whiteSpace: 'pre-wrap' }}
+                              />
+                              <div className="flex gap-2">
+                                <button
+                                  onClick={saveEdit}
+                                  className="px-4 py-2 bg-green-600 text-white rounded hover:bg-green-700"
+                                >
+                                  Save
+                                </button>
+                                <button
+                                  onClick={cancelEdit}
+                                  className="px-4 py-2 bg-gray-300 text-gray-700 rounded hover:bg-gray-400"
+                                >
+                                  Cancel
+                                </button>
+                              </div>
+                            </div>
+                          ) : (
+                            <div className="flex items-start gap-2">
+                              <p className="text-gray-700 flex-1" style={{ whiteSpace: 'pre-wrap' }}>
+                                {q.answer}
+                              </p>
+                              <div className="flex flex-col gap-1">
+                                <button
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    copyToClipboard(q.answer, 'answer');
+                                  }}
+                                  className="text-green-500 hover:text-green-700 transition p-1"
+                                  title="Copy answer"
+                                >
+                                  <Copy size={14} />
+                                </button>
+                                <button
+                                  onClick={() => startEditing(selectedDate, topic.id, q.id, 'answer')}
+                                  className="text-blue-500 hover:text-blue-700 transition p-1"
+                                  title="Edit answer"
+                                >
+                                  <Edit2 size={14} />
+                                </button>
+                              </div>
+                            </div>
+                          )}
+                          
+                          {/* Manual Duplicate Input */}
+                          <div className="border-t pt-4">
+                            <div className="flex items-center gap-2 mb-2">
+                              <label className="text-sm font-medium text-gray-600">Mark as duplicate of questions:</label>
+                            </div>
+                            <div className="flex gap-2">
+                              <input
+                                type="text"
+                                value={duplicateInput[duplicateKey] || ''}
+                                onChange={(e) => setDuplicateInput(prev => ({ ...prev, [duplicateKey]: e.target.value }))}
+                                placeholder="Enter question numbers (e.g., 1,3,5)"
+                                className="flex-1 px-3 py-1 text-sm border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                              />
+                              <button
+                                onClick={() => addManualDuplicate(selectedDate, topic.id, q.number)}
+                                className="px-3 py-1 bg-yellow-600 text-white rounded hover:bg-yellow-700 text-sm"
+                              >
+                                Link
+                              </button>
+                            </div>
+                          </div>
                         </div>
                       )}
                     </div>
@@ -465,9 +846,10 @@ export default function Revision() {
                         ...prev,
                         [formKey]: { ...prev[formKey], answer: e.target.value }
                       }))}
-                      placeholder="Enter answer"
+                      placeholder="Enter answer (formatting preserved when pasting)"
                       rows={3}
                       className="w-full px-3 py-2 border border-gray-300 rounded-lg mb-3 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                      style={{ whiteSpace: 'pre-wrap' }}
                     />
                     <div className="flex gap-2">
                       <button

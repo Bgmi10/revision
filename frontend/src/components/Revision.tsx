@@ -9,6 +9,9 @@ interface Question {
   duplicateOf?: number[];
   isDuplicate?: boolean;
   isToggled?: boolean;
+  revisionCount?: number;
+  lastRevisionDate?: string;
+  originalQuestionId?: number;
 }
 
 interface Topic {
@@ -31,6 +34,12 @@ interface Reminder {
   questionIds: number[];
   isCompleted: boolean;
   createdAt: string;
+}
+
+interface RevisionDateGroup {
+  id: string;
+  date: string;
+  topics: Topic[];
 }
 
 export default function Revision() {
@@ -91,6 +100,16 @@ export default function Revision() {
     scheduledDate: '',
     selectedQuestions: [] as number[]
   });
+  const [revisionDateGroups, setRevisionDateGroups] = useState<RevisionDateGroup[]>(() => {
+    const savedRevisionData = localStorage.getItem('revisionDateGroups');
+    return savedRevisionData ? JSON.parse(savedRevisionData) : [];
+  });
+  const [showDatePicker, setShowDatePicker] = useState<Record<string, boolean>>({});
+  const [selectedRevisionDate, setSelectedRevisionDate] = useState<string>(new Date().toISOString().split('T')[0]);
+  const [revisionViewMode, setRevisionViewMode] = useState<'list' | 'calendar'>('list');
+  const [revisionCalendarDate, setRevisionCalendarDate] = useState(new Date());
+  const [revisionTopicPages, setRevisionTopicPages] = useState<Record<string, number>>({});
+  const [revisionSearchQuery, setRevisionSearchQuery] = useState('');
   const questionRefs = useRef<Record<string, HTMLDivElement | null>>({});
   
   useEffect(() => {
@@ -100,6 +119,10 @@ export default function Revision() {
   useEffect(() => {
     localStorage.setItem('revisionReminders', JSON.stringify(reminders));
   }, [reminders]);
+
+  useEffect(() => {
+    localStorage.setItem('revisionDateGroups', JSON.stringify(revisionDateGroups));
+  }, [revisionDateGroups]);
   
   const [expandedQuestions, setExpandedQuestions] = useState<Record<string, boolean>>({});
   const [newTopicName, setNewTopicName] = useState('');
@@ -808,19 +831,6 @@ export default function Revision() {
       setShowReminderForm(false);
     }
   };
-
-  const toggleReminderCompletion = (reminderId: number) => {
-    setReminders(prev => prev.map(reminder => 
-      reminder.id === reminderId 
-        ? { ...reminder, isCompleted: !reminder.isCompleted }
-        : reminder
-    ));
-  };
-
-  const deleteReminder = (reminderId: number) => {
-    setReminders(prev => prev.filter(reminder => reminder.id !== reminderId));
-  };
-
   const getUpcomingReminders = () => {
     const today = new Date().toISOString().split('T')[0];
     return reminders
@@ -835,21 +845,148 @@ export default function Revision() {
       .sort((a, b) => new Date(a.scheduledDate).getTime() - new Date(b.scheduledDate).getTime());
   };
 
-  const getQuestionByNumber = (questionNumber: number) => {
-    for (const dateGroup of dateGroups) {
-      for (const topic of dateGroup.topics) {
-        for (const question of topic.questions) {
-          if (question.number === questionNumber) {
-            return {
-              question,
-              topic: topic.name,
-              date: dateGroup.date
-            };
-          }
-        }
+  const scheduleQuestionForRevision = (dateId: string, topicId: number, questionId: number, revisionDate: string) => {
+    const question = dateGroups
+      .find(dg => dg.id === dateId)?.topics
+      .find(t => t.id === topicId)?.questions
+      .find(q => q.id === questionId);
+    
+    if (!question) return;
+
+    // Create a copy of the question with revision tracking
+    const revisionQuestion: Question = {
+      ...question,
+      id: Date.now(),
+      revisionCount: (question.revisionCount || 0) + 1,
+      lastRevisionDate: revisionDate,
+      originalQuestionId: question.originalQuestionId || question.id
+    };
+
+    // Add to revision date groups
+    setRevisionDateGroups(prev => {
+      const newGroups = [...prev];
+      let targetGroup = newGroups.find(dg => dg.id === revisionDate);
+      
+      if (!targetGroup) {
+        // Create new date group
+        targetGroup = {
+          id: revisionDate,
+          date: revisionDate,
+          topics: []
+        };
+        newGroups.push(targetGroup);
+        newGroups.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
       }
-    }
-    return null;
+
+      // Find or create topic
+      const topicName = dateGroups.find(dg => dg.id === dateId)?.topics.find(t => t.id === topicId)?.name || 'Untitled Topic';
+      let targetTopic = targetGroup.topics.find(t => t.name === topicName);
+      
+      if (!targetTopic) {
+        targetTopic = {
+          id: Date.now(),
+          name: topicName,
+          questions: []
+        };
+        targetGroup.topics.push(targetTopic);
+      }
+
+      // Add question and renumber
+      targetTopic.questions.push(revisionQuestion);
+      targetTopic.questions = renumberQuestions(targetTopic.questions);
+
+      return newGroups;
+    });
+
+    // Hide date picker
+    const key = `${dateId}-${topicId}-${questionId}`;
+    setShowDatePicker(prev => ({ ...prev, [key]: false }));
+  };
+
+  const rescheduleRevisionQuestion = (currentDate: string, topicId: number, questionId: number, newDate: string) => {
+    setRevisionDateGroups(prev => {
+      const newGroups = [...prev];
+      
+      // Find and remove question from current date
+      const currentGroup = newGroups.find(dg => dg.id === currentDate);
+      if (!currentGroup) return prev;
+      
+      const currentTopic = currentGroup.topics.find(t => t.id === topicId);
+      if (!currentTopic) return prev;
+      
+      const questionIndex = currentTopic.questions.findIndex(q => q.id === questionId);
+      if (questionIndex === -1) return prev;
+      
+      const question = currentTopic.questions[questionIndex];
+      
+      // Update revision count and date
+      const updatedQuestion = {
+        ...question,
+        revisionCount: (question.revisionCount || 0) + 1,
+        lastRevisionDate: newDate
+      };
+      
+      // Remove from current location
+      currentTopic.questions.splice(questionIndex, 1);
+      currentTopic.questions = renumberQuestions(currentTopic.questions);
+      
+      // Remove empty topics/dates
+      if (currentTopic.questions.length === 0) {
+        currentGroup.topics = currentGroup.topics.filter(t => t.id !== topicId);
+      }
+      if (currentGroup.topics.length === 0) {
+        return newGroups.filter(dg => dg.id !== currentDate);
+      }
+      
+      // Add to new date
+      let targetGroup = newGroups.find(dg => dg.id === newDate);
+      if (!targetGroup) {
+        targetGroup = {
+          id: newDate,
+          date: newDate,
+          topics: []
+        };
+        newGroups.push(targetGroup);
+        newGroups.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+      }
+      
+      let targetTopic = targetGroup.topics.find(t => t.name === currentTopic.name);
+      if (!targetTopic) {
+        targetTopic = {
+          id: Date.now(),
+          name: currentTopic.name,
+          questions: []
+        };
+        targetGroup.topics.push(targetTopic);
+      }
+      
+      targetTopic.questions.push(updatedQuestion);
+      targetTopic.questions = renumberQuestions(targetTopic.questions);
+      
+      return newGroups;
+    });
+  };
+
+  const getRevisionDateGroup = (dateId: string) => {
+    return revisionDateGroups.find(dg => dg.id === dateId) || null;
+  };
+
+  const getRevisionPaginatedQuestions = (questions: Question[], topicKey: string) => {
+    const questionsPerPage = 8;
+    const currentPage = revisionTopicPages[topicKey] || 1;
+    const startIndex = (currentPage - 1) * questionsPerPage;
+    const endIndex = startIndex + questionsPerPage;
+    
+    return {
+      questions: questions.slice(startIndex, endIndex),
+      totalPages: Math.ceil(questions.length / questionsPerPage),
+      currentPage,
+      totalQuestions: questions.length
+    };
+  };
+
+  const setRevisionTopicPage = (topicKey: string, page: number) => {
+    setRevisionTopicPages(prev => ({ ...prev, [topicKey]: page }));
   };
 
   const currentDateGroup = getCurrentDateGroup();
@@ -1476,6 +1613,46 @@ export default function Revision() {
                               >
                                 <Edit2 size={14} />
                               </button>
+                              {/* Schedule for Revision */}
+                              <div className="relative">
+                                <button
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    const key = `${selectedDate}-${topic.id}-${q.id}`;
+                                    setShowDatePicker(prev => ({ ...prev, [key]: !prev[key] }));
+                                  }}
+                                  className="text-purple-500 hover:text-purple-700 transition p-1"
+                                  title="Schedule for revision"
+                                >
+                                  <Calendar size={14} />
+                                </button>
+                                {showDatePicker[`${selectedDate}-${topic.id}-${q.id}`] && (
+                                  <div className="absolute top-8 right-0 z-50 bg-white border border-gray-300 rounded-lg shadow-lg p-3">
+                                    <div className="text-xs text-gray-600 mb-2">Schedule for revision:</div>
+                                    <input
+                                      type="date"
+                                      min={new Date().toISOString().split('T')[0]}
+                                      onChange={(e) => {
+                                        if (e.target.value) {
+                                          scheduleQuestionForRevision(selectedDate, topic.id, q.id, e.target.value);
+                                        }
+                                      }}
+                                      className="text-sm px-2 py-1 border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-purple-500"
+                                      onClick={(e) => e.stopPropagation()}
+                                    />
+                                    <button
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        const key = `${selectedDate}-${topic.id}-${q.id}`;
+                                        setShowDatePicker(prev => ({ ...prev, [key]: false }));
+                                      }}
+                                      className="ml-2 text-gray-400 hover:text-gray-600"
+                                    >
+                                      <X size={12} />
+                                    </button>
+                                  </div>
+                                )}
+                              </div>
                             </div>
                           )}
                         </div>
@@ -1745,181 +1922,334 @@ export default function Revision() {
         )}
           </>
         ) : (
-          /* Reminders Tab */
-          <div className="space-y-6">
-            {/* Upcoming Reminders */}
-            <div className="bg-white rounded-lg shadow-lg p-6">
-              <div className="flex justify-between items-center mb-4">
-                <h2 className="text-2xl font-bold text-green-800">
-                  Upcoming Reminders ({getUpcomingReminders().length})
+          /* Revision Reminders Tab */
+          <>
+            {/* Search Bar */}
+            <div className="bg-white rounded-lg shadow-lg p-4 mb-6">
+              <div className="relative">
+                <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400" size={20} />
+                <input
+                  type="text"
+                  value={revisionSearchQuery}
+                  onChange={(e) => setRevisionSearchQuery(e.target.value)}
+                  placeholder="Search revision questions..."
+                  className="w-full pl-10 pr-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-transparent"
+                />
+                {revisionSearchQuery && (
+                  <button
+                    onClick={() => setRevisionSearchQuery('')}
+                    className="absolute right-3 top-1/2 transform -translate-y-1/2 text-gray-400 hover:text-gray-600"
+                  >
+                    <X size={16} />
+                  </button>
+                )}
+              </div>
+            </div>
+
+            {/* Date Selection */}
+            <div className="bg-white rounded-lg shadow-lg p-6 mb-6">
+              <div className="flex flex-wrap items-center justify-between gap-4 mb-4">
+                <h2 className="text-xl font-bold text-purple-800 flex items-center gap-2">
+                  <Calendar size={24} />
+                  Revision Schedule ({revisionDateGroups.reduce((sum, dg) => sum + dg.topics.reduce((tsum, t) => tsum + t.questions.length, 0), 0)} total)
                 </h2>
-                <button
-                  onClick={() => setShowReminderForm(true)}
-                  className="bg-green-600 text-white px-4 py-2 rounded-lg hover:bg-green-700 transition flex items-center gap-2"
-                >
-                  <Plus size={20} />
-                  Add Reminder
-                </button>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => setRevisionViewMode('list')}
+                    className={`px-3 py-1 rounded text-sm transition ${
+                      revisionViewMode === 'list' ? 'bg-purple-600 text-white' : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
+                    }`}
+                  >
+                    List View
+                  </button>
+                  <button
+                    onClick={() => setRevisionViewMode('calendar')}
+                    className={`px-3 py-1 rounded text-sm transition ${
+                      revisionViewMode === 'calendar' ? 'bg-purple-600 text-white' : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
+                    }`}
+                  >
+                    Calendar View
+                  </button>
+                </div>
               </div>
               
-              {getUpcomingReminders().length === 0 ? (
-                <p className="text-gray-500 text-center py-8">No upcoming reminders</p>
+              {revisionViewMode === 'list' ? (
+                <div className="flex flex-wrap gap-2 mb-4">
+                  {revisionDateGroups.map(dateGroup => (
+                    <div
+                      key={dateGroup.id}
+                      className={`relative group rounded-lg transition flex items-center gap-2 ${
+                        selectedRevisionDate === dateGroup.id
+                          ? 'bg-purple-600 text-white'
+                          : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
+                      }`}
+                    >
+                      <button
+                        onClick={() => setSelectedRevisionDate(dateGroup.id)}
+                        className="px-4 py-2 flex items-center gap-2 flex-1"
+                      >
+                        {new Date(dateGroup.date).toLocaleDateString()}
+                        <span className="bg-white text-black bg-opacity-20 px-2 py-1 rounded text-sm">
+                          {dateGroup.topics.reduce((sum, t) => sum + t.questions.length, 0)}
+                        </span>
+                      </button>
+                    </div>
+                  ))}
+                </div>
               ) : (
-                <div className="space-y-3">
-                  {getUpcomingReminders().map(reminder => (
-                    <div key={reminder.id} className="border rounded-lg p-4 bg-green-50">
-                      <div className="flex justify-between items-start">
-                        <div className="flex-1">
-                          <h3 className="font-semibold text-gray-800">{reminder.title}</h3>
-                          {reminder.description && (
-                            <p className="text-gray-600 text-sm mt-1">{reminder.description}</p>
-                          )}
-                          <div className="flex items-center gap-4 mt-2 text-sm text-gray-500">
-                            <span>📅 {new Date(reminder.scheduledDate).toLocaleDateString()}</span>
-                            {reminder.questionIds.length > 0 && (
-                              <span>📝 {reminder.questionIds.length} questions</span>
-                            )}
+                <div className="mb-4">
+                  {/* Calendar Header */}
+                  <div className="flex justify-between items-center mb-4">
+                    <button
+                      onClick={() => setRevisionCalendarDate(new Date(revisionCalendarDate.getFullYear(), revisionCalendarDate.getMonth() - 1, 1))}
+                      className="px-3 py-1 bg-gray-200 rounded hover:bg-gray-300 transition"
+                    >
+                      ←
+                    </button>
+                    <h3 className="text-lg font-semibold">
+                      {generateCalendar(revisionCalendarDate).monthName}
+                    </h3>
+                    <button
+                      onClick={() => setRevisionCalendarDate(new Date(revisionCalendarDate.getFullYear(), revisionCalendarDate.getMonth() + 1, 1))}
+                      className="px-3 py-1 bg-gray-200 rounded hover:bg-gray-300 transition"
+                    >
+                      →
+                    </button>
+                  </div>
+                  
+                  {/* Calendar Grid */}
+                  <div className="grid grid-cols-7 gap-1 mb-2">
+                    {['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map(day => (
+                      <div key={day} className="text-center font-semibold text-gray-600 py-2">
+                        {day}
+                      </div>
+                    ))}
+                    {generateCalendar(revisionCalendarDate).days.map((day, index) => {
+                      const isCurrentMonth = day.getMonth() === revisionCalendarDate.getMonth();
+                      const dateStr = day.toISOString().split('T')[0];
+                      const revisionGroup = revisionDateGroups.find(dg => dg.id === dateStr);
+                      const questionCount = revisionGroup ? revisionGroup.topics.reduce((sum, t) => sum + t.questions.length, 0) : 0;
+                      const isSelected = selectedRevisionDate === dateStr;
+                      const isToday = new Date().toDateString() === day.toDateString();
+                      
+                      return (
+                        <div
+                          key={index}
+                          className={`
+                            min-h-[50px] p-1 border rounded cursor-pointer transition
+                            ${!isCurrentMonth ? 'bg-gray-50 text-gray-400' : ''}
+                            ${isSelected ? 'bg-purple-600 text-white' : 'hover:bg-gray-100'}
+                            ${isToday ? 'ring-2 ring-purple-400' : ''}
+                          `}
+                          onClick={() => setSelectedRevisionDate(dateStr)}
+                        >
+                          <div className="text-center text-sm font-medium">
+                            {day.getDate()}
                           </div>
-                          {reminder.questionIds.length > 0 && (
-                            <div className="mt-2 flex flex-wrap gap-1">
-                              {reminder.questionIds.map(qId => {
-                                const questionInfo = getQuestionByNumber(qId);
-                                return questionInfo ? (
-                                  <span key={qId} className="bg-green-200 text-green-800 px-2 py-1 rounded text-xs">
-                                    Q{qId}: {questionInfo.question.question.substring(0, 30)}...
-                                  </span>
-                                ) : null;
-                              })}
+                          {questionCount > 0 && (
+                            <div className={`text-xs text-center mt-1 px-1 py-0.5 rounded ${
+                              isSelected ? 'bg-white text-purple-600' : 'bg-purple-100 text-purple-800'
+                            }`}>
+                              ({questionCount})
                             </div>
                           )}
                         </div>
-                        <div className="flex gap-2 ml-4">
-                          <button
-                            onClick={() => toggleReminderCompletion(reminder.id)}
-                            className="text-green-600 hover:text-green-800 transition p-1"
-                            title="Mark as completed"
-                          >
-                            <Check size={16} />
-                          </button>
-                          <button
-                            onClick={() => deleteReminder(reminder.id)}
-                            className="text-red-500 hover:text-red-700 transition p-1"
-                            title="Delete reminder"
-                          >
-                            <X size={16} />
-                          </button>
-                        </div>
-                      </div>
-                    </div>
-                  ))}
+                      );
+                    })}
+                  </div>
                 </div>
               )}
             </div>
 
-            {/* Overdue Reminders */}
-            {getOverdueReminders().length > 0 && (
-              <div className="bg-white rounded-lg shadow-lg p-6">
-                <h2 className="text-2xl font-bold text-red-800 mb-4">
-                  Overdue Reminders ({getOverdueReminders().length})
-                </h2>
-                <div className="space-y-3">
-                  {getOverdueReminders().map(reminder => (
-                    <div key={reminder.id} className="border border-red-300 rounded-lg p-4 bg-red-50">
-                      <div className="flex justify-between items-start">
-                        <div className="flex-1">
-                          <h3 className="font-semibold text-gray-800">{reminder.title}</h3>
-                          {reminder.description && (
-                            <p className="text-gray-600 text-sm mt-1">{reminder.description}</p>
-                          )}
-                          <div className="flex items-center gap-4 mt-2 text-sm text-gray-500">
-                            <span className="text-red-600 font-medium">
-                              📅 {new Date(reminder.scheduledDate).toLocaleDateString()} (Overdue)
-                            </span>
-                            {reminder.questionIds.length > 0 && (
-                              <span>📝 {reminder.questionIds.length} questions</span>
-                            )}
-                          </div>
-                          {reminder.questionIds.length > 0 && (
-                            <div className="mt-2 flex flex-wrap gap-1">
-                              {reminder.questionIds.map(qId => {
-                                const questionInfo = getQuestionByNumber(qId);
-                                return questionInfo ? (
-                                  <span key={qId} className="bg-red-200 text-red-800 px-2 py-1 rounded text-xs">
-                                    Q{qId}: {questionInfo.question.question.substring(0, 30)}...
-                                  </span>
-                                ) : null;
-                              })}
-                            </div>
-                          )}
-                        </div>
-                        <div className="flex gap-2 ml-4">
-                          <button
-                            onClick={() => toggleReminderCompletion(reminder.id)}
-                            className="text-green-600 hover:text-green-800 transition p-1"
-                            title="Mark as completed"
-                          >
-                            <Check size={16} />
-                          </button>
-                          <button
-                            onClick={() => deleteReminder(reminder.id)}
-                            className="text-red-500 hover:text-red-700 transition p-1"
-                            title="Delete reminder"
-                          >
-                            <X size={16} />
-                          </button>
-                        </div>
-                      </div>
+            {/* Revision Topics and Questions */}
+            <div className="space-y-6">
+              {(() => {
+                const currentRevisionGroup = getRevisionDateGroup(selectedRevisionDate);
+                if (!currentRevisionGroup) {
+                  return (
+                    <div className="text-center py-12 text-gray-500">
+                      <p className="text-lg">No revision questions scheduled for this date.</p>
                     </div>
-                  ))}
-                </div>
-              </div>
-            )}
+                  );
+                }
 
-            {/* Completed Reminders */}
-            {reminders.filter(r => r.isCompleted).length > 0 && (
-              <div className="bg-white rounded-lg shadow-lg p-6">
-                <h2 className="text-2xl font-bold text-gray-600 mb-4">
-                  Completed Reminders ({reminders.filter(r => r.isCompleted).length})
-                </h2>
-                <div className="space-y-3 max-h-64 overflow-y-auto">
-                  {reminders.filter(r => r.isCompleted).map(reminder => (
-                    <div key={reminder.id} className="border rounded-lg p-4 bg-gray-50 opacity-75">
-                      <div className="flex justify-between items-start">
-                        <div className="flex-1">
-                          <h3 className="font-semibold text-gray-600 line-through">{reminder.title}</h3>
-                          {reminder.description && (
-                            <p className="text-gray-500 text-sm mt-1">{reminder.description}</p>
-                          )}
-                          <div className="flex items-center gap-4 mt-2 text-sm text-gray-400">
-                            <span>📅 {new Date(reminder.scheduledDate).toLocaleDateString()}</span>
-                            {reminder.questionIds.length > 0 && (
-                              <span>📝 {reminder.questionIds.length} questions</span>
-                            )}
-                          </div>
-                        </div>
-                        <div className="flex gap-2 ml-4">
-                          <button
-                            onClick={() => toggleReminderCompletion(reminder.id)}
-                            className="text-orange-600 hover:text-orange-800 transition p-1"
-                            title="Mark as incomplete"
-                          >
-                            ↺
-                          </button>
-                          <button
-                            onClick={() => deleteReminder(reminder.id)}
-                            className="text-red-500 hover:text-red-700 transition p-1"
-                            title="Delete reminder"
-                          >
-                            <X size={16} />
-                          </button>
+                return currentRevisionGroup.topics.map(topic => {
+                  let filteredQuestions = topic.questions;
+                  
+                  // Apply search filter
+                  if (revisionSearchQuery.trim()) {
+                    filteredQuestions = filteredQuestions.filter(q => 
+                      q.question.toLowerCase().includes(revisionSearchQuery.toLowerCase()) ||
+                      q.answer.toLowerCase().includes(revisionSearchQuery.toLowerCase())
+                    );
+                  }
+                  
+                  // Skip topics that have no questions after filtering
+                  if (revisionSearchQuery.trim() && filteredQuestions.length === 0) {
+                    return null;
+                  }
+
+                  const topicKey = `${selectedRevisionDate}-${topic.id}`;
+                  const pagination = getRevisionPaginatedQuestions(filteredQuestions, topicKey);
+                  const { questions: paginatedQuestions, totalPages, currentPage, totalQuestions } = pagination;
+
+                  return (
+                    <div key={topic.id} className="bg-white rounded-lg shadow-lg p-6">
+                      <div className="flex justify-between items-center mb-4">
+                        <div className="flex items-center gap-2">
+                          <h2 className="text-2xl font-bold text-purple-800 flex items-center gap-2">
+                            {topic.name}
+                            <span className="bg-purple-100 text-purple-800 px-3 py-1 rounded-full text-sm font-normal">
+                              {totalQuestions}
+                              {revisionSearchQuery && ` (filtered)`}
+                              {totalPages > 1 && ` • Page ${currentPage}/${totalPages}`}
+                            </span>
+                          </h2>
                         </div>
                       </div>
+
+                      {/* Pagination Controls */}
+                      {totalPages > 1 && (
+                        <div className="flex justify-center items-center gap-2 mb-4">
+                          <button
+                            onClick={() => setRevisionTopicPage(topicKey, Math.max(1, currentPage - 1))}
+                            disabled={currentPage === 1}
+                            className="px-3 py-1 bg-gray-200 text-gray-700 rounded disabled:opacity-50 disabled:cursor-not-allowed hover:bg-gray-300"
+                          >
+                            ←
+                          </button>
+                          {Array.from({ length: totalPages }, (_, i) => i + 1).map(pageNum => (
+                            <button
+                              key={pageNum}
+                              onClick={() => setRevisionTopicPage(topicKey, pageNum)}
+                              className={`px-3 py-1 rounded text-sm ${
+                                pageNum === currentPage 
+                                  ? 'bg-purple-600 text-white' 
+                                  : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                              }`}
+                            >
+                              {pageNum}
+                            </button>
+                          ))}
+                          <button
+                            onClick={() => setRevisionTopicPage(topicKey, Math.min(totalPages, currentPage + 1))}
+                            disabled={currentPage === totalPages}
+                            className="px-3 py-1 bg-gray-200 text-gray-700 rounded disabled:opacity-50 disabled:cursor-not-allowed hover:bg-gray-300"
+                          >
+                            →
+                          </button>
+                        </div>
+                      )}
+
+                      {/* Questions */}
+                      <div className="space-y-3 mb-4">
+                        {paginatedQuestions.map((q) => {
+                          const key = `${selectedRevisionDate}-${topic.id}-${q.id}`;
+                          const isExpanded = expandedQuestions[key];
+                          
+                          return (
+                            <div 
+                              key={q.id} 
+                              className="border border-purple-200 rounded-lg overflow-hidden bg-purple-50"
+                            >
+                              <div
+                                onClick={() => toggleQuestionExpansion(selectedRevisionDate, topic.id, q.id)}
+                                className="flex justify-between items-center p-4 hover:bg-purple-100 cursor-pointer transition"
+                              >
+                                <div className="flex items-center gap-3 flex-1">
+                                  <span className="bg-purple-600 text-white px-2 py-1 rounded-full text-sm font-bold min-w-[24px] text-center">
+                                    {q.number}
+                                  </span>
+                                  <h3 className="font-semibold text-gray-800 flex-1">
+                                    {q.question}
+                                  </h3>
+                                  {q.revisionCount && q.revisionCount > 1 && (
+                                    <span className="bg-orange-100 text-orange-800 px-2 py-1 rounded text-xs">
+                                      Revised {q.revisionCount} times
+                                    </span>
+                                  )}
+                                </div>
+                                <div className="flex items-center gap-2">
+                                  {/* Reschedule Date Picker */}
+                                  <div className="relative">
+                                    <button
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        const key = `revision-${selectedRevisionDate}-${topic.id}-${q.id}`;
+                                        setShowDatePicker(prev => ({ ...prev, [key]: !prev[key] }));
+                                      }}
+                                      className="text-purple-500 hover:text-purple-700 transition p-1"
+                                      title="Reschedule revision"
+                                    >
+                                      <Calendar size={14} />
+                                    </button>
+                                    {showDatePicker[`revision-${selectedRevisionDate}-${topic.id}-${q.id}`] && (
+                                      <div className="absolute top-8 right-0 z-50 bg-white border border-gray-300 rounded-lg shadow-lg p-3">
+                                        <div className="text-xs text-gray-600 mb-2">Reschedule to:</div>
+                                        <input
+                                          type="date"
+                                          min={new Date().toISOString().split('T')[0]}
+                                          onChange={(e) => {
+                                            if (e.target.value && e.target.value !== selectedRevisionDate) {
+                                              rescheduleRevisionQuestion(selectedRevisionDate, topic.id, q.id, e.target.value);
+                                              const key = `revision-${selectedRevisionDate}-${topic.id}-${q.id}`;
+                                              setShowDatePicker(prev => ({ ...prev, [key]: false }));
+                                            }
+                                          }}
+                                          className="text-sm px-2 py-1 border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-purple-500"
+                                          onClick={(e) => e.stopPropagation()}
+                                        />
+                                        <button
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            const key = `revision-${selectedRevisionDate}-${topic.id}-${q.id}`;
+                                            setShowDatePicker(prev => ({ ...prev, [key]: false }));
+                                          }}
+                                          className="ml-2 text-gray-400 hover:text-gray-600"
+                                        >
+                                          <X size={12} />
+                                        </button>
+                                      </div>
+                                    )}
+                                  </div>
+                                  {isExpanded ? (
+                                    <ChevronUp className="text-purple-600" size={20} />
+                                  ) : (
+                                    <ChevronDown className="text-purple-600" size={20} />
+                                  )}
+                                </div>
+                              </div>
+                              
+                              {isExpanded && (
+                                <div className="p-4 bg-white border-t border-purple-200">
+                                  <p className="text-gray-700" style={{ whiteSpace: 'pre-wrap' }}>
+                                    {q.answer}
+                                  </p>
+                                  {q.lastRevisionDate && (
+                                    <div className="mt-3 text-sm text-gray-500">
+                                      Last revised: {new Date(q.lastRevisionDate).toLocaleDateString()}
+                                      {q.revisionCount && ` • Revision #${q.revisionCount}`}
+                                    </div>
+                                  )}
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
                     </div>
-                  ))}
-                </div>
+                  );
+                }).filter(Boolean);
+              })()}
+            </div>
+
+            {revisionDateGroups.length === 0 && (
+              <div className="text-center py-12 text-gray-500">
+                <p className="text-lg">No revision questions scheduled yet!</p>
+                <p className="text-sm mt-2">Use the calendar icon in the Revision Manager tab to schedule questions for revision.</p>
               </div>
             )}
-          </div>
+          </>
         )}
       </div>
 

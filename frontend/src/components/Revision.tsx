@@ -930,12 +930,9 @@ export default function Revision() {
       currentTopic.questions.splice(questionIndex, 1);
       currentTopic.questions = renumberQuestions(currentTopic.questions);
       
-      // Remove empty topics/dates
+      // Remove empty topics/dates and filter properly
       if (currentTopic.questions.length === 0) {
         currentGroup.topics = currentGroup.topics.filter(t => t.id !== topicId);
-      }
-      if (currentGroup.topics.length === 0) {
-        return newGroups.filter(dg => dg.id !== currentDate);
       }
       
       // Add to new date
@@ -963,8 +960,22 @@ export default function Revision() {
       targetTopic.questions.push(updatedQuestion);
       targetTopic.questions = renumberQuestions(targetTopic.questions);
       
-      return newGroups;
+      // Clean up empty date groups after processing
+      const filteredGroups = newGroups.filter(dg => dg.topics.length > 0);
+      
+      return filteredGroups;
     });
+
+    // Check if we need to switch dates after the state update
+    setTimeout(() => {
+      setRevisionDateGroups(current => {
+        const currentRevisionGroup = current.find(dg => dg.id === currentDate);
+        if (!currentRevisionGroup || currentRevisionGroup.topics.length === 0) {
+          setSelectedRevisionDate(newDate);
+        }
+        return current;
+      });
+    }, 50);
   };
 
   const getRevisionDateGroup = (dateId: string) => {
@@ -2191,9 +2202,19 @@ export default function Revision() {
                                           min={new Date().toISOString().split('T')[0]}
                                           onChange={(e) => {
                                             if (e.target.value && e.target.value !== selectedRevisionDate) {
-                                              rescheduleRevisionQuestion(selectedRevisionDate, topic.id, q.id, e.target.value);
+                                              const newDate = e.target.value;
+                                              rescheduleRevisionQuestion(selectedRevisionDate, topic.id, q.id, newDate);
                                               const key = `revision-${selectedRevisionDate}-${topic.id}-${q.id}`;
                                               setShowDatePicker(prev => ({ ...prev, [key]: false }));
+                                              
+                                              // Show success message
+                                              const event = new CustomEvent('showToast', { 
+                                                detail: { 
+                                                  message: `Question rescheduled to ${new Date(newDate).toLocaleDateString()}`, 
+                                                  type: 'success' 
+                                                }
+                                              });
+                                              window.dispatchEvent(event);
                                             }
                                           }}
                                           className="text-sm px-2 py-1 border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-purple-500"
